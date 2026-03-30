@@ -1,0 +1,13 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+sqlalchemy==2.0.23
+python-multipart==0.0.6
+requests==2.31.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# MCP 依赖（与 ee3070-mcp 共享）
+mcp==0.1.0
+
+# 可选：用于生产部署
+python-dotenv==1.0.0
