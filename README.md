@@ -51,7 +51,7 @@ python main.py
 上传数据（兼容 Arduino/Python/MATLAB）
 
 ```bash
-curl -X POST "http://localhost:8000/api/thingspeak/update?api_key=YXCJIC121UFP1I5G&field1=10000001&field3=9.99&field4=0.8&field5=3"
+curl -X POST "http://localhost:8000/api/thingspeak/update?api_key=YOUR_WRITE_API_KEY&field1=10000001&field3=9.99&field4=0.8&field5=3"
 ```
 
 **响应：**
@@ -66,7 +66,7 @@ curl -X POST "http://localhost:8000/api/thingspeak/update?api_key=YXCJIC121UFP1I
 获取最新标签同步记录（Arduino 轮询）
 
 ```bash
-curl "http://localhost:8000/api/thingspeak/channels/3275131/feeds/last.json?api_key=63UFGEON1MVYP3Z6"
+curl "http://localhost:8000/api/thingspeak/channels/3275131/feeds/last.json?api_key=YOUR_READ_API_KEY"
 ```
 
 **响应：**
@@ -88,7 +88,7 @@ curl "http://localhost:8000/api/thingspeak/channels/3275131/feeds/last.json?api_
 获取购物车数据（MATLAB 轮询）
 
 ```bash
-curl "http://localhost:8000/api/thingspeak/channels/3275131/feeds.json?api_key=63UFGEON1MVYP3Z6&results=10"
+curl "http://localhost:8000/api/thingspeak/channels/3275131/feeds.json?api_key=YOUR_READ_API_KEY&results=10"
 ```
 
 ### 核心 API 端点
@@ -144,8 +144,8 @@ curl "http://localhost:8000/api/stats/summary?time_range=24h"
 DATABASE_URL = "sqlite:///data/ee3070.db"  # 或 "postgresql://user:pass@localhost/ee3070"
 
 # API 密钥
-API_KEY = "YXCJIC121UFP1I5G"  # Write Key（兼容 ThingSpeak）
-READ_API_KEY = "63UFGEON1MVYP3Z6"  # Read Key
+API_KEY = "YOUR_WRITE_API_KEY"  # Write Key（兼容 ThingSpeak）
+READ_API_KEY = "YOUR_READ_API_KEY"  # Read Key
 
 # Channel ID（兼容 ThingSpeak）
 THINGSPEAK_CHANNEL_ID = 3275131
