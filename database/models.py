@@ -1,7 +1,8 @@
 """
 数据库模型定义
 """
-from sqlalchemy import Column, Integer, Float, String, DateTime, Index
+import json
+from sqlalchemy import Column, Integer, Float, String, DateTime, Index, Text
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 
@@ -70,6 +71,82 @@ class Feed(Base):
             "field6": self.field6,
             "field7": self.field7,
             "field8": self.field8,
+        }
+
+
+class EventLog(Base):
+    """
+    统一事件日志表
+    """
+    __tablename__ = "event_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    event_type = Column(String(64), nullable=False)
+    command_group = Column(String(64), nullable=True)
+    device_id = Column(String(64), nullable=True)
+    peer_device_id = Column(String(64), nullable=True)
+    entity_type = Column(String(32), nullable=True)
+    entity_id = Column(String(64), nullable=True)
+
+    sku = Column(Integer, nullable=True)
+    name = Column(String(255), nullable=True)
+    price = Column(Float, nullable=True)
+    discount = Column(Float, nullable=True)
+    quantity = Column(Integer, nullable=True)
+    coupon_code = Column(String(64), nullable=True)
+    tx_id = Column(Integer, nullable=True)
+
+    request_id = Column(String(64), nullable=True)
+    trace_id = Column(String(64), nullable=True)
+    status = Column(String(32), nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_message = Column(String(1024), nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    payload_json = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index('idx_event_type_timestamp', 'event_type', 'created_at'),
+        Index('idx_device_timestamp', 'device_id', 'created_at'),
+        Index('idx_trace_timestamp', 'trace_id', 'created_at'),
+        Index('idx_tx_timestamp', 'tx_id', 'created_at'),
+        Index('idx_coupon_timestamp', 'coupon_code', 'created_at'),
+        Index('idx_entity_timestamp', 'entity_type', 'entity_id', 'created_at'),
+    )
+
+    def _decode_payload(self):
+        if not self.payload_json:
+            return {}
+        try:
+            return json.loads(self.payload_json)
+        except Exception:
+            return {"raw": self.payload_json}
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "event_type": self.event_type,
+            "command_group": self.command_group,
+            "device_id": self.device_id,
+            "peer_device_id": self.peer_device_id,
+            "entity_type": self.entity_type,
+            "entity_id": self.entity_id,
+            "sku": self.sku,
+            "name": self.name,
+            "price": self.price,
+            "discount": self.discount,
+            "quantity": self.quantity,
+            "coupon_code": self.coupon_code,
+            "tx_id": self.tx_id,
+            "request_id": self.request_id,
+            "trace_id": self.trace_id,
+            "status": self.status,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "latency_ms": self.latency_ms,
+            "payload": self._decode_payload(),
         }
 
 

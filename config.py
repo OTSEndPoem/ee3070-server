@@ -14,17 +14,16 @@ DATABASE_URL = os.getenv(
 )
 
 # API 配置
-API_KEY = os.getenv("API_KEY", "YXCJIC121UFP1I5G")  # ThingSpeak 兼容的 Write Key
-READ_API_KEY = os.getenv("READ_API_KEY", "63UFGEON1MVYP3Z6")  # Read Key
+WRITE_API_KEY = os.getenv("WRITE_API_KEY", "EE3070_WRITE_KEY")
+READ_API_KEY = os.getenv("READ_API_KEY", "EE3070_READ_KEY")
 
 # 应用配置
-APP_NAME = "EE3070 Server"
-APP_VERSION = "1.0.0"
+APP_NAME = "EE3070 Event Server"
+APP_VERSION = "2.0.0"
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
-# ThingSpeak 兼容配置
-THINGSPEAK_CHANNEL_ID = 3275131  # 原始 Channel ID（用于兼容）
-MIN_UPDATE_INTERVAL = 15.2  # 秒，防止限频
+# 事件写入重试节流，避免客户端疯狂重试把数据库打爆
+MIN_EVENT_RETRY_INTERVAL = 0.25
 
 # 创建数据目录
 os.makedirs(f"{BASE_DIR}/data", exist_ok=True)
