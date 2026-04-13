@@ -7,12 +7,14 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
+import requests
 
-from config import WRITE_API_KEY, READ_API_KEY
+from config import WRITE_API_KEY, READ_API_KEY, STRIPE_SECRET_KEY
 from database import get_db
 from database.models import Coupon, EventLog, Product
 
@@ -134,6 +136,67 @@ class PaymentRequest(BaseModel):
     request_id: Optional[str] = None
     trace_id: Optional[str] = None
     note: Optional[str] = None
+
+
+class StripeCheckoutSessionRequest(BaseModel):
+    amount_in_cents: int = Field(..., gt=0)
+    currency: str = "hkd"
+    payment_method_types: List[str] = Field(default_factory=lambda: ["card"])
+    product_name: str = "Smart_Supermarket_Order"
+    device_id: Optional[str] = None
+    tx_id: Optional[int] = None
+    coupon_code: Optional[str] = None
+    request_id: Optional[str] = None
+    trace_id: Optional[str] = None
+
+
+class StripeCheckoutSessionResponse(BaseModel):
+    success: bool
+    session_id: str
+    checkout_url: str
+    amount_in_cents: int
+    currency: str
+
+
+def _server_url(request) -> str:
+    return str(request.base_url).rstrip("/")
+
+
+def _stripe_session_payload(
+    request: StripeCheckoutSessionRequest,
+    success_url: str,
+    cancel_url: str,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "mode": "payment",
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "line_items[0][quantity]": 1,
+        "line_items[0][price_data][currency]": request.currency.lower(),
+        "line_items[0][price_data][unit_amount]": request.amount_in_cents,
+        "line_items[0][price_data][product_data][name]": request.product_name,
+    }
+    for index, payment_method in enumerate(request.payment_method_types):
+        payload[f"payment_method_types[{index}]"] = payment_method
+    if request.tx_id is not None:
+        payload["metadata[tx_id]"] = str(request.tx_id)
+    if request.device_id:
+        payload["metadata[device_id]"] = request.device_id
+    if request.coupon_code:
+        payload["metadata[coupon_code]"] = request.coupon_code
+    if request.request_id:
+        payload["metadata[request_id]"] = request.request_id
+    if request.trace_id:
+        payload["metadata[trace_id]"] = request.trace_id
+    return payload
+
+
+def _stripe_session_id_from_url(checkout_url: str) -> str:
+    if not checkout_url:
+        return ""
+    if "/checkout/" not in checkout_url:
+        return ""
+    return checkout_url.rsplit("/", 1)[-1]
 
 
 def _require_write_key(write_key: Optional[str]) -> None:
@@ -853,3 +916,182 @@ async def record_payment(
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/stripe/checkout/sessions")
+async def create_stripe_checkout_session(
+    request_body: StripeCheckoutSessionRequest,
+    request: Request,
+    write_key: str = Query(..., alias="write_key"),
+    db: Session = Depends(get_db),
+):
+    _require_write_key(write_key)
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY is not configured")
+
+    if not request_body.payment_method_types:
+        raise HTTPException(status_code=400, detail="payment_method_types must not be empty")
+
+    base_url = _server_url(request)
+    success_url = f"{base_url}/api/stripe/success?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{base_url}/api/stripe/cancel?session_id={{CHECKOUT_SESSION_ID}}"
+    payload = _stripe_session_payload(request_body, success_url, cancel_url)
+
+    try:
+        response = requests.post(
+            "https://api.stripe.com/v1/checkout/sessions",
+            headers={"Authorization": f"Bearer {STRIPE_SECRET_KEY}"},
+            data=payload,
+            timeout=15,
+        )
+        if not response.ok:
+            try:
+                error_data = response.json()
+            except Exception:
+                error_data = {"error": {"message": response.text}}
+            detail = error_data.get("error", {}).get("message") or response.text or "Stripe session creation failed"
+            raise HTTPException(status_code=response.status_code, detail=detail)
+
+        session_data = response.json()
+        checkout_url = session_data.get("url")
+        session_id = session_data.get("id") or _stripe_session_id_from_url(checkout_url)
+        if not checkout_url or not session_id:
+            raise HTTPException(status_code=502, detail="Stripe did not return a checkout URL")
+
+        event = _create_event(
+            db,
+            EventCreateRequest(
+                event_type="stripe_checkout_session_created",
+                command_group="payment",
+                device_id=request_body.device_id,
+                entity_type="stripe_checkout_session",
+                entity_id=session_id,
+                tx_id=request_body.tx_id,
+                coupon_code=request_body.coupon_code,
+                request_id=request_body.request_id,
+                trace_id=request_body.trace_id,
+                status="created",
+                payload={
+                    "checkout_url": checkout_url,
+                    "amount_in_cents": request_body.amount_in_cents,
+                    "currency": request_body.currency,
+                    "payment_method_types": request_body.payment_method_types,
+                },
+            ),
+        )
+        db.commit()
+        db.refresh(event)
+        return StripeCheckoutSessionResponse(
+            success=True,
+            session_id=session_id,
+            checkout_url=checkout_url,
+            amount_in_cents=request_body.amount_in_cents,
+            currency=request_body.currency,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/stripe/success", response_class=HTMLResponse)
+async def stripe_checkout_success(
+    session_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY is not configured")
+
+    session_data: Dict[str, Any] = {}
+    if session_id:
+        response = requests.get(
+            f"https://api.stripe.com/v1/checkout/sessions/{session_id}",
+            headers={"Authorization": f"Bearer {STRIPE_SECRET_KEY}"},
+            timeout=15,
+        )
+        if response.ok:
+            session_data = response.json()
+
+    metadata = session_data.get("metadata") or {}
+    payment_status = session_data.get("payment_status", "paid")
+    tx_id = metadata.get("tx_id")
+    device_id = metadata.get("device_id")
+    coupon_code = metadata.get("coupon_code")
+    request_id = metadata.get("request_id")
+    trace_id = metadata.get("trace_id")
+    amount_total = session_data.get("amount_total")
+    currency = session_data.get("currency", "hkd")
+    payment_methods = session_data.get("payment_method_types") or ["stripe_checkout"]
+
+    if session_id:
+        event = _create_event(
+            db,
+            EventCreateRequest(
+                event_type="payment_recorded",
+                command_group="payment",
+                device_id=device_id,
+                entity_type="payment",
+                entity_id=session_id,
+                tx_id=int(tx_id) if str(tx_id).isdigit() else None,
+                coupon_code=coupon_code,
+                request_id=request_id,
+                trace_id=trace_id,
+                status=payment_status,
+                price=(amount_total / 100.0) if isinstance(amount_total, (int, float)) else None,
+                payload={
+                    "stripe_session_id": session_id,
+                    "payment_method_types": payment_methods,
+                    "currency": currency,
+                    "checkout_url": session_data.get("url"),
+                },
+            ),
+        )
+        db.commit()
+        db.refresh(event)
+
+    return HTMLResponse(
+        f"""
+        <html>
+          <head><meta charset=\"utf-8\"><title>支付成功</title></head>
+          <body style=\"font-family: sans-serif; padding: 24px;\">
+            <h2>支付成功</h2>
+            <p>服务器已收到 Stripe 支付结果。你可以返回购物车继续操作。</p>
+            <p>Session: {session_id or 'unknown'}</p>
+          </body>
+        </html>
+        """
+    )
+
+
+@router.get("/stripe/cancel", response_class=HTMLResponse)
+async def stripe_checkout_cancel(
+    session_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    if session_id:
+        event = _create_event(
+            db,
+            EventCreateRequest(
+                event_type="stripe_checkout_canceled",
+                command_group="payment",
+                entity_type="stripe_checkout_session",
+                entity_id=session_id,
+                status="canceled",
+            ),
+        )
+        db.commit()
+        db.refresh(event)
+
+    return HTMLResponse(
+        f"""
+        <html>
+          <head><meta charset=\"utf-8\"><title>支付已取消</title></head>
+          <body style=\"font-family: sans-serif; padding: 24px;\">
+            <h2>支付已取消</h2>
+            <p>你可以返回购物车重新发起支付。</p>
+            <p>Session: {session_id or 'unknown'}</p>
+          </body>
+        </html>
+        """
+    )

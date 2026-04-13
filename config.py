@@ -16,6 +16,7 @@ DATABASE_URL = os.getenv(
 # API 配置
 WRITE_API_KEY = os.getenv("WRITE_API_KEY", "EE3070_WRITE_KEY")
 READ_API_KEY = os.getenv("READ_API_KEY", "EE3070_READ_KEY")
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 
 # 应用配置
 APP_NAME = "EE3070 Event Server"
