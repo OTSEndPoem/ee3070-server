@@ -7,16 +7,17 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 import requests
+import stripe
 
-from config import WRITE_API_KEY, READ_API_KEY, STRIPE_SECRET_KEY
+from config import WRITE_API_KEY, READ_API_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 from database import get_db
-from database.models import Coupon, EventLog, Product
+from database.models import Coupon, EventLog, Feed, Product
 
 
 router = APIRouter(prefix="/api", tags=["Events API"])
@@ -197,6 +198,85 @@ def _stripe_session_id_from_url(checkout_url: str) -> str:
     if "/checkout/" not in checkout_url:
         return ""
     return checkout_url.rsplit("/", 1)[-1]
+
+
+def _record_stripe_payment_event(db: Session, session_data: Dict[str, Any], source: str) -> Optional[EventLog]:
+    session_id = session_data.get("id")
+    if not session_id:
+        return None
+
+    metadata = session_data.get("metadata") or {}
+    payment_status = str(session_data.get("payment_status", "paid"))
+    tx_id_raw = metadata.get("tx_id")
+    tx_id_value: Optional[int] = None
+    if tx_id_raw is not None:
+        try:
+            tx_id_value = int(str(tx_id_raw))
+        except Exception:
+            tx_id_value = None
+
+    existing = (
+        db.query(EventLog)
+        .filter(
+            EventLog.event_type == "payment_recorded",
+            EventLog.entity_id == str(session_id),
+            EventLog.status == payment_status,
+        )
+        .order_by(desc(EventLog.created_at))
+        .first()
+    )
+    if existing:
+        return existing
+
+    amount_total = session_data.get("amount_total")
+    amount_value = (amount_total / 100.0) if isinstance(amount_total, (int, float)) else None
+    payment_methods = session_data.get("payment_method_types") or ["stripe_checkout"]
+
+    event = _create_event(
+        db,
+        EventCreateRequest(
+            event_type="payment_recorded",
+            command_group="payment",
+            device_id=metadata.get("device_id"),
+            entity_type="payment",
+            entity_id=str(session_id),
+            tx_id=tx_id_value,
+            coupon_code=metadata.get("coupon_code"),
+            request_id=metadata.get("request_id"),
+            trace_id=metadata.get("trace_id"),
+            status=payment_status,
+            price=amount_value,
+            payload={
+                "stripe_session_id": session_id,
+                "payment_method_types": payment_methods,
+                "currency": session_data.get("currency", "hkd"),
+                "checkout_url": session_data.get("url"),
+                "source": source,
+            },
+        ),
+    )
+
+    if payment_status == "paid" and tx_id_value is not None:
+        existing_feed = (
+            db.query(Feed)
+            .filter(Feed.field5 == 5, Feed.field7 == tx_id_value)
+            .order_by(desc(Feed.created_at))
+            .first()
+        )
+        if existing_feed is None:
+            db.add(
+                Feed(
+                    created_at=datetime.utcnow(),
+                    field3=amount_value,
+                    field4=1.0,
+                    field5=5,
+                    field6=0,
+                    field7=tx_id_value,
+                    field8=0,
+                )
+            )
+
+    return event
 
 
 def _require_write_key(write_key: Optional[str]) -> None:
@@ -1013,42 +1093,11 @@ async def stripe_checkout_success(
         if response.ok:
             session_data = response.json()
 
-    metadata = session_data.get("metadata") or {}
-    payment_status = session_data.get("payment_status", "paid")
-    tx_id = metadata.get("tx_id")
-    device_id = metadata.get("device_id")
-    coupon_code = metadata.get("coupon_code")
-    request_id = metadata.get("request_id")
-    trace_id = metadata.get("trace_id")
-    amount_total = session_data.get("amount_total")
-    currency = session_data.get("currency", "hkd")
-    payment_methods = session_data.get("payment_method_types") or ["stripe_checkout"]
-
     if session_id:
-        event = _create_event(
-            db,
-            EventCreateRequest(
-                event_type="payment_recorded",
-                command_group="payment",
-                device_id=device_id,
-                entity_type="payment",
-                entity_id=session_id,
-                tx_id=int(tx_id) if str(tx_id).isdigit() else None,
-                coupon_code=coupon_code,
-                request_id=request_id,
-                trace_id=trace_id,
-                status=payment_status,
-                price=(amount_total / 100.0) if isinstance(amount_total, (int, float)) else None,
-                payload={
-                    "stripe_session_id": session_id,
-                    "payment_method_types": payment_methods,
-                    "currency": currency,
-                    "checkout_url": session_data.get("url"),
-                },
-            ),
-        )
-        db.commit()
-        db.refresh(event)
+        event = _record_stripe_payment_event(db, session_data, source="success_page")
+        if event is not None:
+            db.commit()
+            db.refresh(event)
 
     return HTMLResponse(
         f"""
@@ -1062,6 +1111,48 @@ async def stripe_checkout_success(
         </html>
         """
     )
+
+
+@router.post("/stripe/webhook")
+async def stripe_webhook(
+    request: Request,
+    stripe_signature: Optional[str] = Header(default=None, alias="Stripe-Signature"),
+    db: Session = Depends(get_db),
+):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY is not configured")
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET is not configured")
+    if not stripe_signature:
+        raise HTTPException(status_code=400, detail="Missing Stripe signature")
+
+    payload = await request.body()
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    try:
+        event = stripe.Webhook.construct_event(payload, stripe_signature, STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    event_type = event.get("type", "")
+    session = event.get("data", {}).get("object", {})
+
+    if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"} and isinstance(session, dict):
+        created_event = _record_stripe_payment_event(db, session, source="webhook")
+        if created_event is not None:
+            db.commit()
+            db.refresh(created_event)
+    elif event_type == "checkout.session.async_payment_failed" and isinstance(session, dict):
+        fail_session = dict(session)
+        fail_session["payment_status"] = "failed"
+        created_event = _record_stripe_payment_event(db, fail_session, source="webhook")
+        if created_event is not None:
+            db.commit()
+            db.refresh(created_event)
+
+    return {"status": "success"}
 
 
 @router.get("/stripe/cancel", response_class=HTMLResponse)

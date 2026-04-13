@@ -142,6 +142,17 @@ curl -X POST "http://localhost:8000/api/payments?write_key=YOUR_WRITE_API_KEY" \
   -d '{"tx_id":8891,"amount":108.8,"payment_method":"wechat","status":"paid","device_id":"checkout_2"}'
 ```
 
+#### POST /api/stripe/webhook
+Stripe 官方异步回调入口（验签后写入 `payment_recorded` 事件）。
+
+在 Stripe Dashboard 的 Webhook Endpoint URL 填写：
+
+```text
+http://43.156.92.189:8000/api/stripe/webhook
+```
+
+需要在服务器环境变量中配置 `STRIPE_WEBHOOK_SECRET`（`whsec_...`）。
+
 #### 读取辅助接口
 
 ```bash
@@ -162,6 +173,10 @@ DATABASE_URL = "sqlite:///data/ee3070.db"  # 或 "postgresql://user:pass@localho
 WRITE_API_KEY = "YOUR_WRITE_API_KEY"
 READ_API_KEY = "YOUR_READ_API_KEY"
 
+# Stripe
+STRIPE_SECRET_KEY = "sk_test_or_live_key"
+STRIPE_WEBHOOK_SECRET = "whsec_xxx"
+
 # 客户端重试节流（秒）
 MIN_EVENT_RETRY_INTERVAL = 0.25
 ```
@@ -172,6 +187,8 @@ MIN_EVENT_RETRY_INTERVAL = 0.25
 export DATABASE_URL="sqlite:///data/ee3070.db"
 export WRITE_API_KEY="your-write-key"
 export READ_API_KEY="your-read-key"
+export STRIPE_SECRET_KEY="sk_test_or_live_key"
+export STRIPE_WEBHOOK_SECRET="whsec_xxx"
 export DEBUG="True"
 ```
 
